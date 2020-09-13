@@ -1,0 +1,326 @@
+---
+title: "Covid Data Analysis"
+output:
+  word_document: default
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+
+# This chunk shows/hides the code in your final report. When echo = TRUE, the code
+# is shown in the report. When echo = FALSE, the code is hidden from the final report.
+# We would like to see your code, so please leave the setting as is during the course.
+# This chunk will not show up in your reports, so you can safely ignore its existence.
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+This is a minor analysis report created using two datasets containing information about worldwide Covid cases, deaths, locations, etc. and the same but specifically in US. We look at some of the obvious insights that can be garnered by delving deep into these datasets. One drawback is that the data was available only from January until June for the worldwide dataset, while the US dataset has the same until August.
+
+We start by loading a few essential packages.
+
+```{r}
+
+#setwd("C:\Program Files\R\R-3.6.2")
+
+library("tidyverse")
+library("tidymodels")
+library("plotly")
+library("skimr")
+library("caret")
+library("lubridate")
+library("plyr")
+library("dplyr")
+library("fpp3")
+library("anomalize")
+library("maps")
+library("ggplot2")
+library("reshape2")
+library("ggrepel")
+
+```
+
+We read into the global level Covid data.
+
+```{r}
+
+df <- read_csv("Covid_Global_Level.csv")
+df$Date <- mdy(df$Date)
+df
+
+```
+
+A rough overview of the same, with basic statistical breakdown.
+
+```{r}
+
+skim(df)
+
+```
+
+We can perform a few basic operations to clean it, like converting the date column to date format (done above), removing rows containing NAs, as they are a minuscule percentage of the entire data.
+
+```{r}
+
+df <- df %>% 
+  drop_na(Population_Count)
+
+skim(df)
+
+```
+
+Overview continued. We can see that this dataset consists of a large number of rows, with each row highlighting the number of cases and deaths on a particular date in a particular location. The difference between the previous date cases and the date shown in the row is also present, thereby allowing us to check how many cases were confirmed on that date.
+
+```{r}
+
+str(df)
+
+```
+
+Here, we essentially group together total cases and deaths for each country in the dataset, along with population of each country and the percentage of fatal cases.
+
+```{r}
+
+confirmed_cases <- df %>% 
+  filter(Case_Type == "Confirmed") %>% 
+  group_by(Country_Region) %>% 
+  tally(Difference)
+
+names(confirmed_cases)[names(confirmed_cases) == "n"] <- "Total_cases"
+names(confirmed_cases)[names(confirmed_cases) == "Country_Region"] <- "Country"
+
+deaths <- df %>% 
+  filter(Case_Type == "Deaths") %>% 
+  group_by(Country_Region) %>% 
+  tally(Difference)
+
+names(deaths)[names(deaths) == "n"] <- "Total_deaths"
+names(deaths)[names(deaths) == "Country_Region"] <- "Country"
+
+confirmed_cases_and_deaths <- merge(confirmed_cases, deaths, by = "Country")
+
+confirmed_cases_and_deaths$Population <- 0
+
+for (i in unique(df$Country_Region)){
+  temp_df <- df %>% 
+    filter(Country_Region == i)
+  
+  if (sum(temp_df$Province_State == "N/A") != 0){
+    confirmed_cases_and_deaths$Population[confirmed_cases_and_deaths$Country == i] <- 
+      unique(temp_df$Population_Count[temp_df$Country_Region == i & temp_df$Province_State == "N/A"])
+  }
+  if (sum(temp_df$Province_State == "N/A") == 0){
+    confirmed_cases_and_deaths$Population[confirmed_cases_and_deaths$Country == i] <- sum(unique(temp_df$Population_Count))
+  }
+}
+
+confirmed_cases_and_deaths <- confirmed_cases_and_deaths[!confirmed_cases_and_deaths$Population == 0, ]
+
+confirmed_cases_and_deaths <- confirmed_cases_and_deaths[c("Country", "Population", "Total_cases", "Total_deaths")] %>% 
+  mutate(Percentage_deaths_cases = (Total_deaths/Total_cases)*100)
+
+confirmed_cases_and_deaths <- confirmed_cases_and_deaths %>% 
+  drop_na(Population)
+
+confirmed_cases_and_deaths
+
+```
+
+A brief overview of the cumulative dataframe created above.
+
+```{r}
+
+skim(confirmed_cases_and_deaths)
+
+```
+
+A plot showcasing the severity of the pandemic relative to a country's population. This graph highlights (albeit unclearly) all the countries in the dataset.
+
+```{r fig.height = 10, fig.width = 20}
+
+total_cases_plot <- ggplot(confirmed_cases_and_deaths, aes(x = Population/1000000, y = Total_cases/1000)) + geom_point() + 
+  scale_x_continuous(breaks = seq(0, 1500, by = 100)) + scale_y_continuous(breaks = seq(0, 2000, len = 5)) + 
+  geom_text(aes(label = Country)) + xlab("Population (in millions)") + ylab("Total cases (in thousands)")
+
+total_cases_plot
+
+```
+
+We now zoom into the above graph to get a better picture of the situation. A simple filter was deployed; population was limited to a range of 10 million to 500 million and the number of cases was limited to a range of 10 thousand to 1 million. This gave us a list of highly populated countries with high number of cases (excluding the outliers China, India and US).
+
+```{r fig.height = 10, fig.width = 20}
+
+temp <- subset(confirmed_cases_and_deaths, 1e+7 < Population & Population < 5e+08 & 1e+4 < Total_cases & Total_cases < 1e+6)
+
+total_cases_plot1 <- ggplot(temp, aes(x = Population/1000000, y = Total_cases/1000, label = Country)) + geom_point() + geom_label_repel() + 
+  scale_x_continuous(breaks = seq(0, 300, by = 50)) + scale_y_continuous(breaks = seq(0, 600, len = 4)) + 
+  xlab("Population (in millions)") + ylab("Total cases (in thousands)")
+
+total_cases_plot1
+
+```
+
+Now we focus on finding out the total number of confirmed cases and deaths on each date between January and June.
+
+```{r}
+
+datewise_confirmed_cases <- df %>%
+  filter(Case_Type == "Confirmed") %>% 
+  group_by(Date) %>% 
+  tally(Difference)
+
+names(datewise_confirmed_cases)[names(datewise_confirmed_cases) == "n"] <- "Total_cases"
+
+datewise_deaths <- df %>%
+  filter(Case_Type == "Deaths") %>% 
+  group_by(Date) %>% 
+  tally(Difference)
+
+names(datewise_deaths)[names(datewise_deaths) == "n"] <- "Total_deaths"
+
+datewise_confirmed_cases_and_deaths <- merge(datewise_confirmed_cases, datewise_deaths, by = "Date") %>% 
+  mutate(Percentage_deaths_cases = (Total_deaths/Total_cases)*100)
+
+datewise_confirmed_cases_and_deaths
+
+```
+
+Below is the plot of how the virus spread over the months. As clearly seen, cases were exponentially increasing in March, due to which complete lockdowns were implemented all over. This helped flatten the curve for a few months, get the situation slightly under control (especially the health sector), before cases started spiking again in June.
+
+```{r fig.height = 5, fig.width = 10}
+
+daily_cases_plot <- ggplot(datewise_confirmed_cases_and_deaths, aes(x = Date, y = Total_cases/1000)) +
+  geom_line() + xlab("Month") + ylab("Daily cases (in thousands)")
+
+daily_cases_plot
+
+```
+
+We now move on to the dataset containing information about cases and deaths on a datewise basis in US.
+
+```{r}
+
+df1 <- read_csv("Covid_US_State_and_County_Level.csv")
+df1$date <- mdy(df1$date)
+df1
+
+```
+
+Basic statistical breakdown follows.
+
+```{r}
+
+skim(df1)
+
+```
+
+Continued.
+
+```{r}
+
+str(df1)
+
+```
+
+We create a dataframe to showcase daily cases for each date between January and August for all major regions (states and territories) in US.
+
+```{r}
+
+list_of_states <- list()
+list_of_dfs <- list()
+
+list_of_states <- unique(df1$state)
+
+for(i in 1:length(list_of_states))
+  {
+    temp <- df1 %>% 
+      filter(state == list_of_states[i])
+    
+    state_cases <- aggregate(temp$cases, by = list(Date = temp$date), FUN = sum) %>% 
+      mutate(Daily_cases = x - lag(x))
+    
+    names(state_cases)[names(state_cases) == "Daily_cases"] <- list_of_states[i]
+    
+    state_cases[is.na(state_cases)] <- 0
+    state_cases$x <- NULL
+    
+    list_of_dfs[[i]] <- state_cases
+  }
+
+statewise_daily_cases <- list_of_dfs %>% 
+  reduce(left_join, by = "Date")
+
+statewise_daily_cases
+
+```
+
+We create a subset of the above dataframe to highlight the top 10 worst regions to be affected by this pandemic. Worst here would imply the total number of cases confirmed in the specified time period. Although a better measure may have been cases per 100,000 people, population data was not included in the dataset and external data was not used.
+
+```{r}
+
+top_10_states_daily_cases <- statewise_daily_cases[, names(sort(colSums(statewise_daily_cases[-1]), decreasing = TRUE))]
+
+top_10_states_daily_cases <- cbind(top_10_states_daily_cases, Date = statewise_daily_cases$Date)
+
+top_10_states_daily_cases <- top_10_states_daily_cases[, c(ncol(top_10_states_daily_cases), 1:(ncol(top_10_states_daily_cases) - 1))]
+
+top_10_states_daily_cases <- top_10_states_daily_cases[-c(12:59)]
+
+top_10_states_daily_cases
+
+```
+
+We plot the timeline of how the virus took over in these top 10 states in the specified time period. We can see that it hit New York the hardest in the initial period, after which the lockdown implemented in early April helped reduce the cases for a few months in all these states. Owing to the lax and illogical approach of the government in easing the lockdown to save the tanking economy, we can see the spike in cases in every one of these states, starting mid-June.
+
+```{r fig.height = 10, fig.width = 20}
+
+plot_df <- melt(top_10_states_daily_cases, id.vars = "Date", variable.name = "States")
+
+top_10_states_daily_cases_plot <- ggplot(plot_df, aes(Date, value)) + geom_line(aes(colour = States)) + 
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") + xlab("Month") + ylab("Daily cases")
+
+top_10_states_daily_cases_plot
+
+```
+
+A datewise breakdown of cases and deaths.
+
+```{r}
+
+datewise_cases <- aggregate(df1$cases, by = list(Date = df1$date), FUN = sum) %>% 
+  mutate(Daily_cases = x - lag(x))
+
+datewise_cases[is.na(datewise_cases)] <- 0
+datewise_cases$x <- NULL
+
+datewise_deaths <- aggregate(df1$deaths, by = list(Date = df1$date), FUN = sum) %>% 
+  mutate(Daily_deaths = x - lag(x))
+
+datewise_deaths[is.na(datewise_deaths)] <- 0
+datewise_deaths$x <- NULL
+
+datewise_cases_and_deaths <- merge(datewise_cases, datewise_deaths, by = "Date") %>% 
+  mutate(Percentage_deaths_cases = (Daily_deaths/Daily_cases)*100)
+
+datewise_cases_and_deaths[is.na(datewise_cases_and_deaths)] <- 0
+
+datewise_cases_and_deaths
+
+```
+
+We plot the same to showcase the timeline of this pandemic. That second wave, bigger and way worse than the first, sure came along nicely.
+
+```{r fig.height = 5, fig.width = 10}
+
+daily_cases_plot1 <- ggplot(datewise_cases_and_deaths, aes(x = Date, y = Daily_cases)) + scale_x_date(date_labels = "%b", date_breaks = "1 month") + 
+  geom_line() + xlab("Month") + ylab("Daily cases")
+
+daily_cases_plot1
+
+```
+
+
